@@ -16,11 +16,14 @@ class WeatherViewModel: ObservableObject {
     @Published var city: String = ""
     @Published var time = ""
     
+    
     // MARK: - Private properties
     private var locationService = LocationService()
+    private var location: CLLocation?
     private var geocoder = CLGeocoder()
     private var cancellables = Set<AnyCancellable>()
     private let service: NetworkServiceProtocol!
+    private let timerBackpressure = Timer.publish(every: 30, on: .main, in: .common) .autoconnect()
     private let formatter: DateFormatter = {
         let  dateFormatter = DateFormatter()
         dateFormatter.timeStyle = .medium
@@ -36,17 +39,25 @@ class WeatherViewModel: ObservableObject {
     
     // MARK: - Private functions
     private func getLocation() {
-        locationService
+        let subscription = locationService
             .location
-            .removeDuplicates()
-            .handleEvents(receiveSubscription: { _ in
-                print("Geodata acquisition will begin")
-            }, receiveCancel: {
-                print("Geodata acquisition canceled")
+            .pausableSink(receiveCompletion: { print("Pausable subscription completed: \($0)") },
+                          receiveValue: { value -> Bool in
+                print("Receive value: \(value) % \(String(describing: self.location))")
+                if self.location?.coordinate.latitude == value.coordinate.latitude &&
+                    self.location?.coordinate.longitude == value.coordinate.longitude {
+                    return false
+                }
+                self.getWeatherData(location: value)
+                self.getNameCity(location: value)
+                self.location = value
+                return true
             })
-            .sink {
-                self.getWeatherData(location: $0)
-                self.getNameCity(location: $0)
+        
+        timerBackpressure
+            .sink { _ in
+                guard subscription.paused else { return }
+                subscription.resume()
             }
             .store(in: &cancellables)
     }
@@ -54,11 +65,6 @@ class WeatherViewModel: ObservableObject {
     private func getWeatherData(location: CLLocation) {
         service.getWeatherData(location: location)
             .receive(on: DispatchQueue.main)
-            .handleEvents(receiveSubscription: { _ in
-                print("Network request will start")
-            }, receiveCancel: {
-                print("Network request cancelled")
-            })
             .sink(receiveCompletion: { print($0) },
                   receiveValue: { self.temperature = String(format: "%.0f", $0.currentWeather.temperature) })
             .store(in: &cancellables)
@@ -73,8 +79,7 @@ class WeatherViewModel: ObservableObject {
     }
     
     private func setUpTimer() {
-        Timer
-            .publish(every: 1, on: .main, in: .common)
+        Timer.publish(every: 1, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] time in
                 guard let self = self else { return }
